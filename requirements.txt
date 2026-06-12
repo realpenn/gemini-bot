@@ -1,0 +1,5 @@
+openai>=1.76.0,<2
+python-dotenv>=1.0.1,<2
+python-telegram-bot>=21.10,<22
+tavily-python>=0.7.0,<1
+urllib3>=1.26,<2
