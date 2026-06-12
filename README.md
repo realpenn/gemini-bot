@@ -8,7 +8,7 @@
 - 如果配置了 `ALLOWED_USER_ID`，该用户允许私聊 bot；该用户在群里的普通消息不会自动触发。
 - 其他私聊、群聊或直接访问会回复 `NO_PERMISSION_TEXT`。
 - 普通群聊消息如果不是直接找 bot，bot 会保持沉默，避免刷屏。
-- 模型回复会优先按 Telegram Markdown 格式发送；如果 Markdown 解析失败，会自动退回纯文本。
+- 模型回复会转换为 Telegram MarkdownV2 格式发送；如果解析失败，会自动退回纯文本。
 - 使用 OpenAI-compatible 接口调用配置的模型。
 - 支持通过 Tavily API 调用 `web_search` tool 获取实时网络信息。
 

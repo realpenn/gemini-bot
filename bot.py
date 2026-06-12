@@ -12,6 +12,8 @@ from typing import Any, Iterable
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAIError
 from tavily import AsyncTavilyClient
+from telegramify_markdown import count_markdown, telegramify
+from telegramify_markdown.interpreters import TextInterpreter
 from telegram import BotCommand, Message, MessageEntity, Update
 from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.error import BadRequest, TelegramError
@@ -20,6 +22,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 LOGGER = logging.getLogger(__name__)
 MAX_TELEGRAM_MESSAGE_LENGTH = 4096
+MAX_TELEGRAM_MARKDOWN_LENGTH = 3900
 ENV_FILE = Path(__file__).resolve().with_name(".env")
 MAX_TOOL_ROUNDS = 3
 MAX_WEB_SEARCH_RESULTS = 8
@@ -282,6 +285,24 @@ def chunks(text: str, size: int = MAX_TELEGRAM_MESSAGE_LENGTH) -> Iterable[str]:
         yield text[start : start + size]
 
 
+async def telegram_markdown_chunks(text: str) -> list[str]:
+    rendered_parts = await telegramify(
+        text,
+        interpreters_use=[TextInterpreter()],
+        max_word_count=MAX_TELEGRAM_MARKDOWN_LENGTH,
+    )
+    rendered_chunks = []
+    for part in rendered_parts:
+        content = getattr(part, "content", "")
+        if not content:
+            continue
+        if count_markdown(content) <= MAX_TELEGRAM_MESSAGE_LENGTH:
+            rendered_chunks.append(content)
+        else:
+            rendered_chunks.extend(chunks(content, MAX_TELEGRAM_MARKDOWN_LENGTH))
+    return rendered_chunks or [text]
+
+
 def model_system_prompt(settings: Settings, tools_enabled: bool) -> str:
     if not tools_enabled:
         return settings.system_prompt
@@ -509,31 +530,60 @@ async def ask_gemini(
     return "我已经完成了网络查询，但暂时没能整理出可靠回复，请稍后再试。"
 
 
+async def send_reply_chunk(
+    message: Message,
+    text: str,
+    *,
+    first: bool,
+    parse_mode: str | None = None,
+) -> bool:
+    if first:
+        await message.reply_text(text, do_quote=True, parse_mode=parse_mode)
+        return False
 
-async def reply_text(message: Message, text: str) -> None:
+    await message.get_bot().send_message(
+        message.chat_id,
+        text,
+        parse_mode=parse_mode,
+    )
+    return False
+
+
+async def reply_plain_text(message: Message, text: str) -> None:
     first = True
     for chunk in chunks(text):
+        first = await send_reply_chunk(message, chunk, first=first)
+
+
+async def reply_text(message: Message, text: str) -> None:
+    try:
+        rendered_chunks = await telegram_markdown_chunks(text)
+    except Exception as exc:
+        LOGGER.exception("Markdown rendering failed; falling back to plain text: %s", exc)
+        await reply_plain_text(message, text)
+        return
+
+    first = True
+    for rendered_chunk in rendered_chunks:
         try:
-            if first:
-                await message.reply_text(
-                    chunk,
-                    do_quote=True,
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-                first = False
-            else:
-                await message.get_bot().send_message(
-                    message.chat_id,
-                    chunk,
-                    parse_mode=ParseMode.MARKDOWN,
-                )
+            first = await send_reply_chunk(
+                message,
+                rendered_chunk,
+                first=first,
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
         except BadRequest as exc:
-            LOGGER.warning("Markdown reply failed; falling back to plain text: %s", exc)
+            LOGGER.warning(
+                "MarkdownV2 reply failed; falling back to plain text: %s", exc
+            )
             if first:
-                await message.reply_text(chunk, do_quote=True)
-                first = False
-            else:
-                await message.get_bot().send_message(message.chat_id, chunk)
+                await reply_plain_text(message, text)
+                return
+            first = await send_reply_chunk(
+                message,
+                rendered_chunk,
+                first=first,
+            )
 
 
 async def chat_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
